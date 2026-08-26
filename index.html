@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Orbit — habit chart</title>
+<meta name="description" content="Orbit — a hand-inked celestial habit and productivity chart. Offline, private, no accounts.">
+<meta name="theme-color" content="#F2EFE4">
+<meta name="color-scheme" content="light">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Orbit">
+<link rel="manifest" href="assets/manifest.webmanifest">
+<link rel="icon" href="assets/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Fraunces + Inter are attached by app.js after load, so a slow or absent network never blocks paint. -->
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<!-- Arced planet limbs bleeding off the top and bottom edges -->
+<svg class="limb limb--top" viewBox="0 0 400 120" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+  <path class="limb__fill" d="M-40,-60 C 60,10 150,42 200,44 C 250,46 340,14 440,-60 Z"/>
+  <path class="limb__ink" d="M-40,-58 C 62,12 148,43 200,44.5 C 252,46 338,16 440,-58"/>
+  <path class="limb__ink limb__ink--thin" d="M-40,-48 C 66,22 150,52 200,53.5 C 250,55 334,26 440,-48"/>
+</svg>
+<svg class="limb limb--bottom" viewBox="0 0 400 120" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+  <path class="limb__fill" d="M-40,180 C 60,110 150,78 200,76 C 250,74 340,106 440,180 Z"/>
+  <path class="limb__ink" d="M-40,178 C 62,108 148,77 200,75.5 C 252,74 338,104 440,178"/>
+  <path class="limb__ink limb__ink--thin" d="M-40,168 C 66,98 150,68 200,66.5 C 250,65 334,94 440,168"/>
+</svg>
+
+<header class="topbar">
+  <div class="topbar__brand">
+    <svg class="mark" viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+      <ellipse class="mark__ring" cx="20" cy="20" rx="17" ry="8.5" transform="rotate(-22 20 20)"/>
+      <path class="mark__body" d="M20 9.4c5.6-.2 10.4 4.4 10.6 10.2.2 5.9-4.4 10.8-10.2 11-5.8.2-10.7-4.3-10.9-10.1C9.3 14.6 14 9.6 20 9.4Z"/>
+    </svg>
+    <h1 class="wordmark">Orbit</h1>
+  </div>
+  <div class="topbar__meta">
+    <span class="chip chip--level" id="chipLevel" title="Level">Lv 1</span>
+    <span class="chip" id="chipStreak" title="Overall streak">0d</span>
+  </div>
+</header>
+
+<main id="view" class="view" tabindex="-1"></main>
+
+<nav class="tabbar" role="tablist" aria-label="Views">
+  <button class="tab is-active" role="tab" data-view="today" aria-selected="true"><span class="tab__dot"></span>Today</button>
+  <button class="tab" role="tab" data-view="week" aria-selected="false"><span class="tab__dot"></span>Week</button>
+  <button class="tab" role="tab" data-view="month" aria-selected="false"><span class="tab__dot"></span>Month</button>
+  <button class="tab" role="tab" data-view="stats" aria-selected="false"><span class="tab__dot"></span>Stats</button>
+  <button class="tab" role="tab" data-view="settings" aria-selected="false"><span class="tab__dot"></span>Settings</button>
+</nav>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet__scrim" data-close="1"></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <div class="sheet__grip" aria-hidden="true"></div>
+    <h2 class="sheet__title" id="sheetTitle"></h2>
+    <div class="sheet__body" id="sheetBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="fx" id="fx" aria-hidden="true"></div>
+
+<script src="assets/app.js" defer></script>
+</body>
+</html>
