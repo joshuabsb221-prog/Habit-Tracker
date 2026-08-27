@@ -3,10 +3,15 @@
  * Talks to Supabase over plain REST, so there is no SDK to bundle and no build
  * step: fetch, a public anon key, and row-level security doing the fencing.
  *
- * Sign-in is a six-digit code typed into the app, never a link. A magic link
- * opens the system browser, and an installed home-screen app — iOS especially —
- * keeps its own storage jar, so the link would sign in a window you are not
- * looking at. A typed code stays inside whichever window asked for it.
+ * Sign-in never involves clicking a link. A magic link opens the system browser,
+ * and an installed home-screen app — iOS especially — keeps its own storage jar,
+ * so the link would sign in a window you are not even looking at. Both routes here
+ * stay inside whichever window asked:
+ *
+ *   password — works on a stock Supabase project with nothing else set up;
+ *   code     — a six-digit token typed into the app, which needs custom SMTP,
+ *              because Supabase only lets you put {{ .Token }} in an email
+ *              template once the project has its own mail server.
  *
  * Merging is done by app.js: every record carries a millisecond stamp and the
  * newest write wins, field by field, so two devices editing the same day keep
@@ -33,7 +38,7 @@ var lastSyncedAt = 0;
 var syncing = false, queued = false, dirty = false, applyingRemote = false;
 var timer = null, periodic = null;
 var clockOffset = 0;
-var pending = { stage: 'email', email: '', busy: false, message: '' };
+var pending = { mode: 'password', stage: 'email', email: '', busy: false, message: '' };
 
 /* ---------- little helpers ---------- */
 
@@ -164,6 +169,80 @@ function token() {
 
 /* ---------- sign-in ---------- */
 
+function validCredentials(email, password, minLen) {
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email || '')) return 'Enter a valid email address';
+  if (!password || password.length < minLen) return 'Password must be at least ' + minLen + ' characters';
+  return '';
+}
+
+/** Sign in with a password. Nothing is emailed, so this works on a bare project. */
+function signIn(email, password) {
+  email = (email || '').trim();
+  var bad = validCredentials(email, password, 6);
+  if (bad) { pending.message = bad; emit(); return Promise.resolve(false); }
+  pending.busy = true; pending.message = ''; emit();
+
+  return request('/auth/v1/token?grant_type=password', {
+    method: 'POST', body: { email: email, password: password }
+  }).then(function (res) { return finishSignIn(res); }, function (e) {
+    pending.busy = false;
+    pending.message = /invalid login/i.test(e.message)
+      ? 'Wrong email or password — or use Create account if this is a new device family'
+      : e.message;
+    emit();
+    return false;
+  });
+}
+
+/** Create the account. With email confirmation off, Supabase signs you straight in. */
+function signUp(email, password) {
+  email = (email || '').trim();
+  var bad = validCredentials(email, password, 8);
+  if (bad) { pending.message = bad; emit(); return Promise.resolve(false); }
+  pending.busy = true; pending.message = ''; emit();
+
+  return request('/auth/v1/signup', {
+    method: 'POST', body: { email: email, password: password }
+  }).then(function (res) {
+    if (!res || !res.access_token) {
+      // The project still has "Confirm email" on, so it emailed a link instead of a session.
+      pending.busy = false;
+      pending.message = 'Account made, but the project wants an emailed confirmation. ' +
+        'Turn off Authentication → Sign In / Providers → Email → Confirm email, then sign in.';
+      emit();
+      return false;
+    }
+    return finishSignIn(res);
+  }, function (e) {
+    pending.busy = false;
+    pending.message = /already registered|already exists/i.test(e.message)
+      ? 'That account exists — sign in instead'
+      : e.message;
+    emit();
+    return false;
+  });
+}
+
+function finishSignIn(res) {
+  storeSession(res);
+  pending = { mode: pending.mode, stage: 'email', email: '', busy: false, message: '' };
+  noticeText = 'Signed in. Merging this device with the account…';
+  emit();
+  dirty = true;                                 // always push once, to create or update the row
+  return syncNow('sign-in').then(function () {
+    noticeText = '';
+    emit();
+    return true;
+  });
+}
+
+function setMode(mode) {
+  pending.mode = mode === 'code' ? 'code' : 'password';
+  pending.stage = 'email';
+  pending.message = '';
+  emit();
+}
+
 function sendCode(email) {
   email = (email || '').trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
@@ -216,16 +295,7 @@ function verifyCode(code) {
   };
 
   return attempt().then(function (res) {
-    storeSession(res);
-    pending = { stage: 'email', email: '', busy: false, message: '' };
-    noticeText = 'Signed in. Merging this device with the account…';
-    emit();
-    dirty = true;                               // always push once, to create or update the row
-    return syncNow('sign-in').then(function () {
-      noticeText = '';
-      emit();
-      return true;
-    });
+    return finishSignIn(res);
   }, function (e) {
     pending.busy = false;
     pending.message = e.message;
@@ -235,7 +305,7 @@ function verifyCode(code) {
 }
 
 function cancelCode() {
-  pending = { stage: 'email', email: '', busy: false, message: '' };
+  pending = { mode: pending.mode, stage: 'email', email: '', busy: false, message: '' };
   emit();
 }
 
@@ -352,7 +422,7 @@ function snapshot() {
     error: errorText,
     notice: noticeText,
     lastSyncedAt: lastSyncedAt,
-    pending: { stage: pending.stage, email: pending.email, busy: pending.busy, message: pending.message }
+    pending: { mode: pending.mode, stage: pending.stage, email: pending.email, busy: pending.busy, message: pending.message }
   };
 }
 
@@ -405,6 +475,9 @@ window.OrbitSync = {
   configured: configured,
   config: config,
   setConfig: setConfig,
+  signIn: signIn,
+  signUp: signUp,
+  setMode: setMode,
   sendCode: sendCode,
   verifyCode: verifyCode,
   cancelCode: cancelCode,

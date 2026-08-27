@@ -128,32 +128,49 @@ Nothing is ever uploaded anywhere.
 Optional, and off until you connect a project. Without one Orbit behaves exactly as before: local,
 private, no network. With one, the same chart follows you between phone, tablet and laptop.
 
-### Why a typed code and not a link
+### Signing in without a link
 
-Sign-in is a six-digit code you type into the app. A magic link would open your default browser, and
-an app added to the home screen — on iOS especially — keeps a storage jar of its own, so the link
-would sign in a window you are not even looking at while the installed app stays signed out. A code
-typed into the app signs in the window that asked for it, every time. The code box is marked
-`autocomplete="one-time-code"`, so iOS and Android offer the code straight from the notification.
+Neither route asks you to click a link in an email. A magic link opens your default browser, and an
+app added to the home screen — on iOS especially — keeps a storage jar of its own, so the link would
+sign in a window you are not even looking at while the installed app stays signed out. Both routes
+below finish inside the window that started them.
+
+**Email and password** is the default, and works on a stock Supabase project with nothing else set
+up. Create the account on the first device, then sign in with the same details on the others.
+
+**A six-digit code** typed into the app is offered behind "Email me a code instead". It needs the
+project to have its own SMTP server: Supabase will only let you put `{{ .Token }}` into an email
+template once custom SMTP is configured, and its stock templates send a link and nothing else. Set
+SMTP up (Resend, Brevo, Mailgun, your own — Authentication → Emails → SMTP Settings), then put the
+token into **both** the *Confirm signup* and *Magic Link* templates, for example:
+
+```html
+<h2>Your Orbit code</h2>
+<p style="font-size:28px;letter-spacing:6px"><strong>{{ .Token }}</strong></p>
+```
+
+Both templates matter: the first sign-in for an address sends *Confirm signup*, every one after
+sends *Magic Link*. The code box is marked `autocomplete="one-time-code"`, so iOS and Android offer
+the code straight from the notification.
 
 ### Setting up a project (about five minutes, free)
 
 1. Create a project at [supabase.com](https://supabase.com). Any region; the free tier is plenty.
 2. **SQL Editor → New query**, paste [`supabase/schema.sql`](supabase/schema.sql), **Run**. That
    creates the one table and its row-level security policies.
-3. **Authentication → Emails → Magic Link template**: make sure the body contains `{{ .Token }}`,
-   for example `Your Orbit code is {{ .Token }}`. This step is easy to miss and the whole point —
-   out of the box Supabase emails only a link, and Orbit asks for the code.
-4. **Project Settings → API**: copy the **Project URL** and the **anon public** key.
+3. **Authentication → Sign In / Providers → Email**: turn **off** *Confirm email*. Without this,
+   creating the account emails you a confirmation link instead of signing you in, which is the very
+   thing we are avoiding. The app says so plainly if you forget.
+4. **Project Settings → API**: copy the **Project URL** and the **anon public** key (newer
+   dashboards may call it the *publishable* key — either is fine). Never the `service_role` or
+   secret key: that one bypasses row-level security and must not go into a static site.
 5. Put them in `assets/config.js` and redeploy, or open **Settings → Account & sync** in the app and
    paste them there. The config file is the better route for several devices; the in-app form is
    handy for trying it out on one.
-6. Open Settings → Account & sync, enter your email, and type the code it sends you.
-
-Two things worth doing once your own account exists: turn off **Allow new users to sign up**
-(Authentication → Providers → Email) so nobody else can create an account in your project, and
-attach your own SMTP credentials if you sign in often — Supabase's built-in mailer is rate-limited
-to a handful of messages an hour.
+6. In the app: **Settings → Account & sync** → your email and a password → **Create account**. On
+   every other device, the same details → **Sign in**.
+7. Then go back to **Authentication → Sign In / Providers → Email** and turn **off** *Allow new
+   users to sign up*. Your account keeps working; nobody else can create one in your project.
 
 ### What syncing does
 

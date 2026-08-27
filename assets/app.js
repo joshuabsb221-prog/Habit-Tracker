@@ -1150,7 +1150,7 @@ function renderStats() {
 
 /* ---------- account and sync ---------- */
 
-var syncDraft = { email: '', code: '', url: '', key: '' };
+var syncDraft = { email: '', pass: '', code: '', url: '', key: '' };
 var rendering = false;
 
 function syncGlyph(status) {
@@ -1183,7 +1183,7 @@ function renderSyncCard() {
   }
 
   if (!v.signedIn) {
-    if (v.pending.stage === 'code') {
+    if (v.pending.mode === 'code' && v.pending.stage === 'code') {
       s += '<p class="tiny muted" style="margin:0 0 10px">' + esc(v.pending.message || ('Code sent to ' + v.pending.email)) + '</p>' +
         '<label class="field"><span class="field__label">Six-digit code</span>' +
         '<input type="text" id="syncCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" ' +
@@ -1192,14 +1192,30 @@ function renderSyncCard() {
         '<button class="btn btn--primary" data-act="sync-verify"' + (v.pending.busy ? ' disabled' : '') + '>' + (v.pending.busy ? 'Checking…' : 'Sign in') + '</button>' +
         '<button class="btn" data-act="sync-resend"' + (v.pending.busy ? ' disabled' : '') + '>Send again</button>' +
         '<button class="btn btn--ghost" data-act="sync-back">Different email</button></div>';
-    } else {
-      s += '<p class="tiny muted" style="margin:0 0 10px">Sign in to carry this chart to your other devices. ' +
-        'You will type a six-digit code here rather than click a link — a link opens your browser, and an app added to the home screen has its own separate storage, so the link would sign in the wrong window.</p>' +
+    } else if (v.pending.mode === 'code') {
+      s += '<p class="tiny muted" style="margin:0 0 10px">Orbit will email you a six-digit code to type in here — no link to click, so it works in the installed app. ' +
+        'This route needs the project to have its own SMTP: Supabase only lets you put the code into an email template once custom SMTP is set up.</p>' +
         '<label class="field"><span class="field__label">Email</span>' +
         '<input type="email" id="syncEmail" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" ' +
         'placeholder="you@example.com" value="' + esc(syncDraft.email) + '"></label>' +
         '<div class="btn-row"><button class="btn btn--primary" data-act="sync-send"' + (v.pending.busy ? ' disabled' : '') + '>' +
-        (v.pending.busy ? 'Sending…' : 'Email me a code') + '</button></div>';
+        (v.pending.busy ? 'Sending…' : 'Email me a code') + '</button>' +
+        '<button class="btn btn--ghost" data-act="sync-mode-password">Use a password instead</button></div>';
+      if (v.pending.message) s += '<p class="tiny" style="margin:10px 0 0;color:#9c4f30">' + esc(v.pending.message) + '</p>';
+    } else {
+      s += '<p class="tiny muted" style="margin:0 0 10px">Sign in to carry this chart to your other devices. ' +
+        'Everything happens in this window — nothing to click in an email — so it works the same in the installed app, ' +
+        'where a link would open your browser and sign in a window you are not looking at.</p>' +
+        '<label class="field"><span class="field__label">Email</span>' +
+        '<input type="email" id="syncEmail" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" ' +
+        'placeholder="you@example.com" value="' + esc(syncDraft.email) + '"></label>' +
+        '<label class="field"><span class="field__label">Password</span>' +
+        '<input type="password" id="syncPass" autocomplete="current-password" placeholder="At least 8 characters" value="' + esc(syncDraft.pass) + '"></label>' +
+        '<div class="btn-row">' +
+        '<button class="btn btn--primary" data-act="sync-signin"' + (v.pending.busy ? ' disabled' : '') + '>' + (v.pending.busy ? 'Signing in…' : 'Sign in') + '</button>' +
+        '<button class="btn" data-act="sync-signup"' + (v.pending.busy ? ' disabled' : '') + '>Create account</button></div>' +
+        '<p class="tiny muted" style="margin:10px 0 0">First device? Create the account, then sign in with the same details everywhere else. ' +
+        '<button class="btn btn--sm btn--ghost" data-act="sync-mode-code">Email me a code instead</button></p>';
       if (v.pending.message) s += '<p class="tiny" style="margin:10px 0 0;color:#9c4f30">' + esc(v.pending.message) + '</p>';
     }
     if (!v.fromFile) {
@@ -1839,6 +1855,20 @@ function onAction(e) {
         if (!window.confirm('Disconnect this device from the project? Your chart stays on the device.')) return;
         S.signOut(false); S.setConfig('', ''); render(); toast('Disconnected'); return;
       }
+      if (act === 'sync-mode-code') { syncDraft.pass = ''; S.setMode('code'); return; }
+      if (act === 'sync-mode-password') { S.setMode('password'); return; }
+      if (act === 'sync-signin' || act === 'sync-signup') {
+        syncDraft.email = $('#syncEmail').value;
+        syncDraft.pass = $('#syncPass').value;
+        var run = act === 'sync-signin' ? S.signIn : S.signUp;
+        run(syncDraft.email, syncDraft.pass).then(function (okIn) {
+          if (!okIn) return;
+          syncDraft = { email: '', pass: '', code: '', url: '', key: '' };
+          render();
+          toast('Signed in — this device and your account are merged');
+        });
+        return;
+      }
       if (act === 'sync-send') { syncDraft.email = $('#syncEmail').value; S.sendCode(syncDraft.email); return; }
       if (act === 'sync-resend') { S.sendCode(S.snapshot().pending.email); return; }
       if (act === 'sync-back') { syncDraft.code = ''; S.cancelCode(); return; }
@@ -1846,7 +1876,7 @@ function onAction(e) {
         syncDraft.code = $('#syncCode').value;
         S.verifyCode(syncDraft.code).then(function (okSignIn) {
           if (!okSignIn) return;
-          syncDraft = { email: '', code: '', url: '', key: '' };
+          syncDraft = { email: '', pass: '', code: '', url: '', key: '' };
           render();
           toast('Signed in — this device and your account are merged');
         });
@@ -1919,6 +1949,7 @@ function bindSettingsInputs() {
     var t = e.target;
     if (!t || !t.id) return;
     if (t.id === 'syncEmail') syncDraft.email = t.value;
+    else if (t.id === 'syncPass') syncDraft.pass = t.value;
     else if (t.id === 'syncCode') syncDraft.code = t.value;
     else if (t.id === 'cfgUrl') syncDraft.url = t.value;
     else if (t.id === 'cfgKey') syncDraft.key = t.value;
