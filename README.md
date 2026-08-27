@@ -3,8 +3,9 @@
 A habit and productivity tracker drawn as a hand-inked celestial chart. Seven planets in loose
 orbit, a cream-paper ground, and no dashboard anywhere in sight.
 
-Static HTML, CSS and JavaScript — no build step, no framework, no backend, no accounts. Everything
-lives in `localStorage` on the device that logged it.
+Static HTML, CSS and JavaScript — no build step, no framework. Everything lives in `localStorage` on
+the device that logged it; sync across devices is optional, off until you connect a project, and
+described under [Sync](#sync).
 
 ## Run it
 
@@ -89,7 +90,7 @@ busy days used. Cells inside the back-fill window are tappable.
 month, busy-day count.
 **Stats** — level dial, lifetime points, every streak current vs best, all-time completion rate per
 habit, and a sparkline of the last 12 weeks against target.
-**Settings** — habit editor, quota rules, minimums, export/import, wipe.
+**Settings** — account and sync, habit editor, quota rules, minimums, export/import, wipe.
 
 ## Data
 
@@ -102,17 +103,82 @@ State is one `localStorage` key, `orbit.v1`:
   "habits": [{ "id": "h-gym", "name": "Gym", "type": "binary", "cadence": "weekly",
                "weeklyTarget": 4, "min": 0, "discharge": 0, "color": "ink", "ring": "tilt",
                "archived": false, "order": 4, "createdAt": "2026-08-26" }],
-  "days": { "2026-08-26": { "busy": null, "logs": { "h-malay": { "m": 20 }, "h-gym": { "s": 2 } } } },
+  "days": { "2026-08-26": { "busy": null, "busyT": 0,
+                            "logs": { "h-malay": { "m": 20, "t": 1787812345678 } },
+                            "del":  { "h-gym": 1787812349999 } } },
   "settings": { "quotaEnabled": true, "busyQuota": 2, "veryBusyQuota": 1 },
-  "meta": { "peakPoints": 128.5, "level": 3 }
+  "tombstones": { "habits": { "h-reply": 1787812340000 } },
+  "meta": { "peakPoints": 128.5, "level": 3, "settingsT": 1787812340000 }
 }
 ```
 
 Log shapes: `{"d":1}` a plain completion, `{"m":20}` twenty minutes, `{"s":2}` two sessions.
 
+Every record carries `t`, a millisecond stamp of its last edit, and every deletion leaves a
+tombstone — `del` for a cleared log, `tombstones.habits` for a deleted habit — so a removal travels
+between devices as an edit rather than as an absence. Merging compares those stamps entry by entry;
+see [Sync](#sync).
+
 **Export** downloads `orbit-backup.json` — the object above, verbatim. **Import** merges: habits
 match on id, then on name; day entries merge by date with the incoming file winning any clash.
 Nothing is ever uploaded anywhere.
+
+## Sync
+
+Optional, and off until you connect a project. Without one Orbit behaves exactly as before: local,
+private, no network. With one, the same chart follows you between phone, tablet and laptop.
+
+### Why a typed code and not a link
+
+Sign-in is a six-digit code you type into the app. A magic link would open your default browser, and
+an app added to the home screen — on iOS especially — keeps a storage jar of its own, so the link
+would sign in a window you are not even looking at while the installed app stays signed out. A code
+typed into the app signs in the window that asked for it, every time. The code box is marked
+`autocomplete="one-time-code"`, so iOS and Android offer the code straight from the notification.
+
+### Setting up a project (about five minutes, free)
+
+1. Create a project at [supabase.com](https://supabase.com). Any region; the free tier is plenty.
+2. **SQL Editor → New query**, paste [`supabase/schema.sql`](supabase/schema.sql), **Run**. That
+   creates the one table and its row-level security policies.
+3. **Authentication → Emails → Magic Link template**: make sure the body contains `{{ .Token }}`,
+   for example `Your Orbit code is {{ .Token }}`. This step is easy to miss and the whole point —
+   out of the box Supabase emails only a link, and Orbit asks for the code.
+4. **Project Settings → API**: copy the **Project URL** and the **anon public** key.
+5. Put them in `assets/config.js` and redeploy, or open **Settings → Account & sync** in the app and
+   paste them there. The config file is the better route for several devices; the in-app form is
+   handy for trying it out on one.
+6. Open Settings → Account & sync, enter your email, and type the code it sends you.
+
+Two things worth doing once your own account exists: turn off **Allow new users to sign up**
+(Authentication → Providers → Email) so nobody else can create an account in your project, and
+attach your own SMTP credentials if you sign in often — Supabase's built-in mailer is rate-limited
+to a handful of messages an hour.
+
+### What syncing does
+
+The whole document is stored as one row per account. On each sync Orbit pulls that row, merges it
+into the local one, and pushes the result back under a compare-and-set on a revision number, so a
+device that loses a race re-merges instead of overwriting.
+
+Merging is per entry, not per document: a habit, a single day's log, the busy flag on a day, and the
+settings block each carry their own stamp, and the newer edit wins. Two devices logging different
+habits on the same day therefore keep both logs, and clearing a log on one device clears it on the
+other rather than being undone by the other device's stale copy. An edit you make always outranks
+the record it replaces even if the other device's clock is ahead, and Orbit corrects its own clock
+against the server's on every request. The monotonic level counters take the higher of the two
+sides, so a level is never lost to a merge.
+
+Syncs run a couple of seconds after a change, when the app returns to the foreground, every five
+minutes while it is open, and when the network comes back. Offline, everything keeps working and
+the changes go up on the next connection.
+
+### What it costs you in privacy
+
+The anon key is a public client key — that is by design, and it grants nothing on its own: the three
+row-level security policies in the schema let a signed-in account read and write only its own row.
+The data is not end-to-end encrypted, so anyone with admin access to your Supabase project (you) can
+read it. If that matters, the alternative is to stay signed out and move backups by hand.
 
 ## Offline
 
@@ -128,11 +194,15 @@ the app runs there anyway, just without the cache.
 index.html
 sw.js                     root-scope shim: importScripts('assets/sw.js')
 assets/
-  app.js                  state, scoring, views, interaction
+  app.js                  state, scoring, merging, views, interaction
+  sync.js                 optional account and cross-device sync
+  config.js               your Supabase URL and anon key (empty = sync off)
   styles.css              palette and layout
   manifest.webmanifest
   sw.js                   the actual worker — cache list and fetch strategy
   icons/
+supabase/
+  schema.sql              the table and its row-level security policies
 .nojekyll
 ```
 

@@ -1,6 +1,8 @@
 /* Orbit — a hand-inked celestial habit chart.
-   Vanilla JS, no build step, no framework, no backend.
-   All state lives in localStorage under "orbit.v1". */
+   Vanilla JS, no build step, no framework.
+   All state lives in localStorage under "orbit.v1"; when an account is connected,
+   assets/sync.js mirrors that same document to Supabase. Every record carries a
+   millisecond stamp so two devices merge field by field, newest write winning. */
 (function () {
 'use strict';
 
@@ -112,12 +114,34 @@ function freshState() {
       c.order = i;
       c.archived = false;
       c.createdAt = start;
+      c.t = 0;                       // never written by this device yet, so any edit wins
       return c;
     }),
     days: {},
     settings: { quotaEnabled: DEFAULT_SETTINGS.quotaEnabled, busyQuota: DEFAULT_SETTINGS.busyQuota, veryBusyQuota: DEFAULT_SETTINGS.veryBusyQuota },
-    meta: { peakPoints: 0, level: 1 }
+    tombstones: { habits: {} },
+    deviceId: uid('dev'),
+    meta: { peakPoints: 0, level: 1, settingsT: 0 }
   };
+}
+
+/**
+ * Wall-clock milliseconds, corrected by the offset sync.js measures against the
+ * server's clock. Every merge decision is a comparison of these stamps, so a
+ * device with a badly wrong clock would otherwise win or lose everything.
+ */
+function now() {
+  return Date.now() + (window.OrbitSync ? window.OrbitSync.clockOffset() : 0);
+}
+
+/**
+ * A stamp that is guaranteed to beat the entry it replaces. Two devices' clocks
+ * never agree exactly, so without this a tap could land "before" the record it is
+ * editing and be undone by the next sync — the edit would vanish in front of you.
+ */
+function stampAfter(prev) {
+  var t = now();
+  return t > (prev || 0) ? t : (prev || 0) + 1;
 }
 
 function normalise(s) {
@@ -130,7 +154,11 @@ function normalise(s) {
   ['quotaEnabled', 'busyQuota', 'veryBusyQuota'].forEach(function (k) {
     if (typeof s.settings[k] === 'undefined') s.settings[k] = DEFAULT_SETTINGS[k];
   });
-  s.meta = s.meta || { peakPoints: 0, level: 1 };
+  s.meta = s.meta || { peakPoints: 0, level: 1, settingsT: 0 };
+  s.meta.settingsT = +s.meta.settingsT || 0;
+  s.tombstones = s.tombstones || { habits: {} };
+  s.tombstones.habits = s.tombstones.habits || {};
+  s.deviceId = s.deviceId || uid('dev');
   if (!Array.isArray(s.habits) || !s.habits.length) s.habits = base.habits;
   s.habits.forEach(function (h, i) {
     h.id = h.id || uid();
@@ -144,17 +172,41 @@ function normalise(s) {
     h.ring = RINGS.indexOf(h.ring) >= 0 ? h.ring : 'solid';
     h.archived = !!h.archived;
     h.createdAt = h.createdAt || s.createdAt;
+    h.t = +h.t || 0;
     if (typeof h.order !== 'number') h.order = i;
   });
-  // Days: keep only well-formed records.
+  // A habit deleted more recently than its own last edit stays deleted.
+  s.habits = s.habits.filter(function (h) { return (s.tombstones.habits[h.id] || 0) <= h.t; });
+  // Days: keep only well-formed records, and stamp anything that predates sync.
+  var live = {};
+  s.habits.forEach(function (h) { live[h.id] = true; });
   Object.keys(s.days).forEach(function (k) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) { delete s.days[k]; return; }
     var d = s.days[k] || {};
     if (d.busy !== 'busy' && d.busy !== 'very') d.busy = null;
+    d.busyT = +d.busyT || 0;
     d.logs = (d.logs && typeof d.logs === 'object') ? d.logs : {};
+    d.del = (d.del && typeof d.del === 'object') ? d.del : {};
+    Object.keys(d.logs).forEach(function (hid) {
+      var log = d.logs[hid];
+      if (!log || typeof log !== 'object') { delete d.logs[hid]; return; }
+      log.t = +log.t || 0;
+      if (s.tombstones.habits[hid] || !live[hid]) delete d.logs[hid];      // orphan of a deleted habit
+      else if ((d.del[hid] || 0) > log.t) delete d.logs[hid];
+    });
+    Object.keys(d.del).forEach(function (hid) {
+      if (s.tombstones.habits[hid] || !live[hid]) delete d.del[hid];
+    });
     s.days[k] = d;
   });
   return s;
+}
+
+/** Days holding at least one log — an emptied day keeps its record to carry tombstones. */
+function loggedDays() {
+  return Object.keys(state.days).filter(function (k) {
+    return Object.keys(state.days[k].logs).length > 0;
+  });
 }
 
 function load() {
@@ -170,6 +222,7 @@ function save() {
   } catch (e) {
     toast('Could not save — storage is full or blocked');
   }
+  if (window.OrbitSync) window.OrbitSync.localChanged();
 }
 
 function habitsSorted(includeArchived) {
@@ -183,7 +236,12 @@ function habitById(id) {
 }
 function dayRec(date, create) {
   var d = state.days[date];
-  if (!d && create) { d = state.days[date] = { busy: null, logs: {} }; }
+  if (!d && create) { d = state.days[date] = { busy: null, busyT: 0, logs: {}, del: {} }; }
+  if (d) {                                   // tolerate records written by an older version
+    if (!d.logs) d.logs = {};
+    if (!d.del) d.del = {};
+    if (typeof d.busyT !== 'number') d.busyT = 0;
+  }
   return d || null;
 }
 function firstDate() {
@@ -1080,7 +1138,7 @@ function renderStats() {
   s += '<div class="tiles">' +
     '<div class="tile"><div class="tile__value num">' + fmtPoints(lifetimePoints()) + '</div><div class="tile__label">Lifetime points</div></div>' +
     '<div class="tile"><div class="tile__value num">' + totalLogs + '</div><div class="tile__label">Completions logged</div></div>' +
-    '<div class="tile"><div class="tile__value num">' + Object.keys(state.days).length + '</div><div class="tile__label">Days on the chart</div></div>' +
+    '<div class="tile"><div class="tile__value num">' + loggedDays().length + '</div><div class="tile__label">Days on the chart</div></div>' +
     '<div class="tile"><div class="tile__value num">' + levelThreshold(info.level) + '</div><div class="tile__label">Next threshold</div></div>' +
     '</div>';
   return s;
@@ -1090,9 +1148,86 @@ function renderStats() {
    11. Settings
    ================================================================ */
 
+/* ---------- account and sync ---------- */
+
+var syncDraft = { email: '', code: '', url: '', key: '' };
+var rendering = false;
+
+function syncGlyph(status) {
+  var seed = 4711, color = '#B6C2A8', dash = '', mark = '';
+  if (status === 'syncing' || status === 'pending') { color = '#D9B48B'; dash = ' stroke-dasharray="3 4"'; }
+  if (status === 'offline') { color = '#9FB3C0'; dash = ' stroke-dasharray="1.6 4"'; }
+  if (status === 'error') { color = '#C87F5E'; mark = '<path d="M5.5,5.5 L12.5,12.6" stroke="#C87F5E" stroke-width="1.5" stroke-linecap="round"/>'; }
+  return '<svg viewBox="0 0 18 18" width="13" height="13" aria-hidden="true" focusable="false" style="vertical-align:-1px">' +
+    '<path d="' + inkCircle(9, 9, 6, seed, 0.08) + '" fill="' + (status === 'synced' ? color : 'none') + '" ' +
+    'opacity="' + (status === 'synced' ? '.75' : '1') + '" stroke="#2C2A26" stroke-width="1.3"' + dash + '/>' + mark + '</svg>';
+}
+
+function renderSyncCard() {
+  if (!window.OrbitSync) {
+    return '<div class="card"><p class="tiny muted" style="margin:0">Sync is unavailable — <code>assets/sync.js</code> did not load.</p></div>';
+  }
+  var v = window.OrbitSync.snapshot();
+  var s = '<div class="card" id="syncCard">';
+
+  if (!v.configured) {
+    s += '<p class="tiny muted" style="margin:0 0 10px">Orbit needs no account: everything works offline on this device. ' +
+      'To carry the same chart between devices, connect a free Supabase project — the README has the SQL and the five-minute setup — then paste its two public values here.</p>' +
+      '<label class="field"><span class="field__label">Project URL</span>' +
+      '<input type="text" id="cfgUrl" spellcheck="false" autocapitalize="off" placeholder="https://xxxx.supabase.co" value="' + esc(syncDraft.url) + '"></label>' +
+      '<label class="field"><span class="field__label">Anon (public) key</span>' +
+      '<input type="text" id="cfgKey" spellcheck="false" autocapitalize="off" placeholder="eyJhbGciOi…" value="' + esc(syncDraft.key) + '"></label>' +
+      '<div class="btn-row"><button class="btn btn--primary" data-act="sync-config-save">Connect project</button></div>';
+    if (v.error) s += '<p class="tiny" style="color:#9c4f30;margin:10px 0 0">' + esc(v.error) + '</p>';
+    return s + '</div>';
+  }
+
+  if (!v.signedIn) {
+    if (v.pending.stage === 'code') {
+      s += '<p class="tiny muted" style="margin:0 0 10px">' + esc(v.pending.message || ('Code sent to ' + v.pending.email)) + '</p>' +
+        '<label class="field"><span class="field__label">Six-digit code</span>' +
+        '<input type="text" id="syncCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" ' +
+        'placeholder="000000" style="letter-spacing:.4em;font-size:20px;text-align:center" value="' + esc(syncDraft.code) + '"></label>' +
+        '<div class="btn-row">' +
+        '<button class="btn btn--primary" data-act="sync-verify"' + (v.pending.busy ? ' disabled' : '') + '>' + (v.pending.busy ? 'Checking…' : 'Sign in') + '</button>' +
+        '<button class="btn" data-act="sync-resend"' + (v.pending.busy ? ' disabled' : '') + '>Send again</button>' +
+        '<button class="btn btn--ghost" data-act="sync-back">Different email</button></div>';
+    } else {
+      s += '<p class="tiny muted" style="margin:0 0 10px">Sign in to carry this chart to your other devices. ' +
+        'You will type a six-digit code here rather than click a link — a link opens your browser, and an app added to the home screen has its own separate storage, so the link would sign in the wrong window.</p>' +
+        '<label class="field"><span class="field__label">Email</span>' +
+        '<input type="email" id="syncEmail" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" ' +
+        'placeholder="you@example.com" value="' + esc(syncDraft.email) + '"></label>' +
+        '<div class="btn-row"><button class="btn btn--primary" data-act="sync-send"' + (v.pending.busy ? ' disabled' : '') + '>' +
+        (v.pending.busy ? 'Sending…' : 'Email me a code') + '</button></div>';
+      if (v.pending.message) s += '<p class="tiny" style="margin:10px 0 0;color:#9c4f30">' + esc(v.pending.message) + '</p>';
+    }
+    if (!v.fromFile) {
+      s += '<p class="tiny muted" style="margin:12px 0 0">Connected to <code>' + esc(v.url.replace('https://', '')) + '</code> · ' +
+        '<button class="btn btn--sm btn--ghost" data-act="sync-config-clear">Disconnect</button></p>';
+    }
+    return s + '</div>';
+  }
+
+  s += '<div class="switch" style="border-top:0"><span class="switch__text">' + esc(v.email) +
+    '<small>' + syncGlyph(v.status) + ' ' + esc(v.statusText) + '</small></span>' +
+    '<button class="btn btn--sm" data-act="sync-now"' + (v.status === 'syncing' ? ' disabled' : '') + '>Sync now</button></div>';
+  if (v.notice) s += '<p class="tiny muted" style="margin:0 0 8px">' + esc(v.notice) + '</p>';
+  s += '<p class="tiny muted" style="margin:8px 0 10px">Changes sync a couple of seconds after you make them, when the app comes back to the front, and every five minutes it is open. ' +
+    'Edits made on two devices merge entry by entry — the newer edit of any one habit, day or setting wins, so nothing is silently overwritten.</p>' +
+    '<div class="btn-row"><button class="btn" data-act="sync-signout">Sign out</button>' +
+    '<button class="btn btn--danger btn--sm" data-act="sync-signout-wipe">Sign out and clear this device</button></div>';
+  return s + '</div>';
+}
+
 function renderSettings() {
   var habits = habitsSorted(true);
   var s = '';
+  // Account first: it is the one thing here that reaches beyond this device.
+
+  s += '<div class="section"><div class="section__head"><span class="section__title">Account &amp; sync</span>' +
+    '<span class="section__note">' + esc(window.OrbitSync ? window.OrbitSync.snapshot().statusText : 'Unavailable') + '</span></div>' +
+    renderSyncCard() + '</div>';
 
   s += '<div class="section"><div class="section__head"><span class="section__title">Habits</span>' +
     '<button class="btn btn--sm" data-act="habit-new">+ Add habit</button></div><div class="hlist">';
@@ -1127,7 +1262,7 @@ function renderSettings() {
     '</div></div>';
 
   s += '<div class="section"><div class="section__head"><span class="section__title">Data</span>' +
-    '<span class="section__note">Stays on this device</span></div><div class="card">' +
+    '<span class="section__note">' + (window.OrbitSync && window.OrbitSync.snapshot().signedIn ? 'This device and your account' : 'Stays on this device') + '</span></div><div class="card">' +
     '<div class="btn-row">' +
       '<button class="btn" data-act="export">Export JSON</button>' +
       '<button class="btn" data-act="import">Import JSON</button>' +
@@ -1286,9 +1421,16 @@ function setLog(habitId, date, log) {
   if (!h || !isEditable(date)) return false;
   var before = levelInfo().level;
   var d = dayRec(date, true);
-  if (log === null) delete d.logs[habitId];
-  else d.logs[habitId] = log;
-  if (!Object.keys(d.logs).length && !d.busy) delete state.days[date];
+  var prev = d.logs[habitId] ? (d.logs[habitId].t || 0) : (d.del[habitId] || 0);
+  var stamp = stampAfter(prev);
+  if (log === null) {
+    delete d.logs[habitId];
+    d.del[habitId] = stamp;                    // a tombstone, so the clear syncs as an edit
+  } else {
+    log.t = stamp;
+    d.logs[habitId] = log;
+    delete d.del[habitId];
+  }
   save();
   var after = levelInfo().level;
   if (after > before) celebrateLevel(after);
@@ -1322,7 +1464,7 @@ function setBusy(date, mode) {
     }
     d.busy = mode;                       // the two modes are mutually exclusive
   }
-  if (!Object.keys(d.logs).length && !d.busy) delete state.days[date];
+  d.busyT = stampAfter(d.busyT);
   save();
   render();
 }
@@ -1344,13 +1486,14 @@ function saveHabitFromSheet(id) {
   if (h) {
     h.name = name; h.type = type; h.cadence = cadence; h.weeklyTarget = cadence === 'daily' ? 7 : target;
     h.min = min; h.discharge = discharge; h.color = color; h.ring = ring;
+    h.t = stampAfter(h.t);
     toast('Saved');
   } else {
     var maxOrder = state.habits.reduce(function (m, x) { return Math.max(m, x.order); }, -1);
     state.habits.push({
       id: uid(), name: name, type: type, cadence: cadence,
       weeklyTarget: cadence === 'daily' ? 7 : target, min: min, discharge: discharge,
-      color: color, ring: ring, archived: false, order: maxOrder + 1, createdAt: today()
+      color: color, ring: ring, archived: false, order: maxOrder + 1, createdAt: today(), t: stampAfter(0)
     });
     toast('Habit added');
   }
@@ -1363,6 +1506,7 @@ function moveHabit(id, delta) {
   if (i < 0 || j < 0 || j >= list.length) return;
   var a = list[i], b = list[j], tmp = a.order;
   a.order = b.order; b.order = tmp;
+  a.t = stampAfter(a.t); b.t = stampAfter(b.t);
   save(); render();
 }
 
@@ -1381,62 +1525,109 @@ function exportData() {
   toast('Exported ' + EXPORT_NAME);
 }
 
-function mergeImport(raw) {
-  var incoming;
-  try { incoming = typeof raw === 'string' ? JSON.parse(raw) : raw; }
-  catch (e) { toast('That is not valid JSON'); return false; }
-  if (!incoming || typeof incoming !== 'object' || (!incoming.habits && !incoming.days)) { toast('Not an Orbit backup'); return false; }
+/**
+ * Merge another Orbit document into the local one, field by field, newest stamp winning.
+ * This is the single merge used by both file import and device sync.
+ *
+ * opts.preferIncoming — for hand-imported backups, where entries may predate stamps
+ * entirely: an incoming entry then wins a tie instead of losing it, which keeps the
+ * documented "incoming wins on a clash" behaviour of the Import button.
+ *
+ * Returns { habitsAdded, habitsUpdated, days, changed }.
+ */
+function mergeDoc(incoming, opts) {
+  opts = opts || {};
+  var pref = !!opts.preferIncoming;
+  var beats = function (mine, theirs) { return pref ? theirs >= mine : theirs > mine; };
+  var before = JSON.stringify(state);
+  var out = { habitsAdded: 0, habitsUpdated: 0, days: 0, changed: false };
+
   incoming = normalise(JSON.parse(JSON.stringify(incoming)));
 
-  var idMap = {}, added = 0, merged = 0, dayCount = 0;
+  // 1. Deletions first: a tombstone from either side applies to both.
+  Object.keys(incoming.tombstones.habits).forEach(function (id) {
+    var t = incoming.tombstones.habits[id] || 0;
+    if (t > (state.tombstones.habits[id] || 0)) state.tombstones.habits[id] = t;
+  });
+  state.habits = state.habits.filter(function (h) {
+    return (state.tombstones.habits[h.id] || 0) <= (h.t || 0);
+  });
+
+  // 2. Habits: match on id, then on name, so two devices that seeded separately still line up.
+  var idMap = {};
   incoming.habits.forEach(function (ih) {
+    if ((state.tombstones.habits[ih.id] || 0) > (ih.t || 0)) return;      // deleted after this version
     var local = habitById(ih.id);
     if (!local) {
       local = state.habits.filter(function (h) {
         return h.name.toLowerCase().trim() === ih.name.toLowerCase().trim();
       })[0] || null;
     }
-    if (local) {
-      idMap[ih.id] = local.id;
-      local.name = ih.name; local.type = ih.type; local.cadence = ih.cadence;
-      local.weeklyTarget = ih.weeklyTarget; local.min = ih.min; local.discharge = ih.discharge;
-      local.color = ih.color; local.ring = ih.ring; local.archived = ih.archived;
-      if (ih.createdAt < local.createdAt) local.createdAt = ih.createdAt;
-      merged++;
-    } else {
+    if (!local) {
       var maxOrder = state.habits.reduce(function (m, x) { return Math.max(m, x.order); }, -1);
       ih.order = maxOrder + 1;
       state.habits.push(ih);
       idMap[ih.id] = ih.id;
-      added++;
+      out.habitsAdded++;
+      return;
     }
+    idMap[ih.id] = local.id;
+    if (beats(local.t || 0, ih.t || 0)) {
+      local.name = ih.name; local.type = ih.type; local.cadence = ih.cadence;
+      local.weeklyTarget = ih.weeklyTarget; local.min = ih.min; local.discharge = ih.discharge;
+      local.color = ih.color; local.ring = ih.ring; local.archived = ih.archived;
+      local.order = ih.order; local.t = ih.t || 0;
+      out.habitsUpdated++;
+    }
+    if (ih.createdAt < local.createdAt) local.createdAt = ih.createdAt;
   });
 
+  // 3. Days, entry by entry, so two devices logging different habits on the same day both keep theirs.
   Object.keys(incoming.days).forEach(function (date) {
-    var src = incoming.days[date];
-    var dst = dayRec(date, true);
-    if (src.busy !== undefined) dst.busy = src.busy;      // incoming wins
-    Object.keys(src.logs || {}).forEach(function (hid) {
-      var target = idMap[hid] || hid;
-      dst.logs[target] = src.logs[hid];
+    var src = incoming.days[date], dst = dayRec(date, true);
+    out.days++;
+    if (beats(dst.busyT || 0, src.busyT || 0)) { dst.busy = src.busy; dst.busyT = src.busyT || 0; }
+    Object.keys(src.del || {}).forEach(function (hid) {
+      var id = idMap[hid] || hid, t = src.del[hid] || 0;
+      if (t > (dst.del[id] || 0)) dst.del[id] = t;
     });
-    if (!Object.keys(dst.logs).length && !dst.busy) delete state.days[date];
-    dayCount++;
+    Object.keys(src.logs || {}).forEach(function (hid) {
+      var id = idMap[hid] || hid, log = src.logs[hid];
+      var mine = dst.logs[id] ? (dst.logs[id].t || 0) : (dst.del[id] || 0);
+      if (beats(mine, log.t || 0)) { dst.logs[id] = log; }
+    });
+    Object.keys(dst.del).forEach(function (id) {           // a clear that lands after the log removes it
+      var log = dst.logs[id];
+      if (log && dst.del[id] > (log.t || 0)) delete dst.logs[id];
+    });
   });
 
-  if (incoming.settings) {
+  // 4. Settings, and the monotonic level counters.
+  if (incoming.settings && beats(state.meta.settingsT || 0, incoming.meta.settingsT || 0)) {
     state.settings.quotaEnabled = !!incoming.settings.quotaEnabled;
     state.settings.busyQuota = incoming.settings.busyQuota;
     state.settings.veryBusyQuota = incoming.settings.veryBusyQuota;
+    state.meta.settingsT = incoming.meta.settingsT || 0;
   }
   if (incoming.createdAt && incoming.createdAt < state.createdAt) state.createdAt = incoming.createdAt;
-  if (incoming.meta && incoming.meta.peakPoints > (state.meta.peakPoints || 0)) state.meta.peakPoints = incoming.meta.peakPoints;
-  if (incoming.meta && incoming.meta.level > (state.meta.level || 1)) state.meta.level = incoming.meta.level;
+  if (incoming.meta.peakPoints > (state.meta.peakPoints || 0)) state.meta.peakPoints = incoming.meta.peakPoints;
+  if (incoming.meta.level > (state.meta.level || 1)) state.meta.level = incoming.meta.level;
 
   state = normalise(state);
   levelInfo();
+  out.changed = JSON.stringify(state) !== before;
+  return out;
+}
+
+/** The Import button: parse, merge with incoming winning ties, report. */
+function mergeImport(raw) {
+  var incoming;
+  try { incoming = typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch (e) { toast('That is not valid JSON'); return false; }
+  if (!incoming || typeof incoming !== 'object' || (!incoming.habits && !incoming.days)) { toast('Not an Orbit backup'); return false; }
+  var r = mergeDoc(incoming, { preferIncoming: true });
   save();
-  toast('Merged ' + dayCount + ' day' + (dayCount === 1 ? '' : 's') + ' · ' + added + ' new, ' + merged + ' updated');
+  toast('Merged ' + r.days + ' day' + (r.days === 1 ? '' : 's') + ' · ' + r.habitsAdded + ' new, ' + r.habitsUpdated + ' updated');
   return true;
 }
 
@@ -1482,6 +1673,8 @@ var VIEWS = { today: renderToday, week: renderWeek, month: renderMonth, stats: r
 
 function render() {
   var fn = VIEWS[ui.view] || renderToday;
+  var metaBefore = JSON.stringify(state.meta);
+  rendering = true;
   viewEl.innerHTML = fn();
   var info = levelInfo();
   $('#chipLevel').textContent = 'Lv ' + info.level;
@@ -1494,7 +1687,42 @@ function render() {
     b.classList.toggle('is-active', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
-  save();
+  rendering = false;
+  refreshSyncUI();
+  // levelInfo() can raise the monotonic counters; that is the only thing a paint persists.
+  if (JSON.stringify(state.meta) !== metaBefore) save();
+}
+
+/** Repaint just the sync bits, so a status change never clears a half-typed code. */
+function refreshSyncUI() {
+  var chip = $('#chipSync');
+  if (chip) {
+    if (!window.OrbitSync || !window.OrbitSync.configured()) {
+      chip.hidden = true;
+    } else {
+      var v = window.OrbitSync.snapshot();
+      chip.hidden = false;
+      chip.innerHTML = syncGlyph(v.signedIn ? v.status : 'offline');
+      chip.title = 'Sync — ' + v.statusText;
+      chip.classList.toggle('is-error', v.status === 'error');
+    }
+  }
+  if (rendering || ui.view !== 'settings') return;
+  var card = $('#syncCard');
+  if (!card) return;
+  var active = document.activeElement;
+  var id = active && active.id, caret = null;
+  try { caret = active && active.selectionStart; } catch (e) { caret = null; }
+  var holder = document.createElement('div');
+  holder.innerHTML = renderSyncCard();
+  card.parentNode.replaceChild(holder.firstChild, card);
+  if (id) {
+    var again = document.getElementById(id);
+    if (again) {
+      try { again.focus({ preventScroll: true }); } catch (e) { again.focus(); }
+      if (caret != null && again.setSelectionRange) { try { again.setSelectionRange(caret, caret); } catch (e) {} }
+    }
+  }
 }
 
 function go(view) {
@@ -1563,20 +1791,21 @@ function onAction(e) {
     if (act === 'habit-save') { saveHabitFromSheet(id); return; }
     if (act === 'habit-move') { moveHabit(id, +btn.getAttribute('data-delta')); return; }
     if (act === 'habit-archive') {
-      var h = habitById(id); h.archived = !h.archived; save(); closeSheet(); render();
+      var h = habitById(id); h.archived = !h.archived; h.t = stampAfter(h.t); save(); closeSheet(); render();
       toast(h.archived ? h.name + ' archived — history kept' : h.name + ' back in orbit'); return;
     }
     if (act === 'habit-delete') {
       var hd = habitById(id);
       if (!window.confirm('Delete "' + hd.name + '" and purge all of its history? Archiving keeps the history instead.')) return;
       state.habits = state.habits.filter(function (x) { return x.id !== id; });
+      state.tombstones.habits[id] = stampAfter(hd.t);
       Object.keys(state.days).forEach(function (k) {
         delete state.days[k].logs[id];
-        if (!Object.keys(state.days[k].logs).length && !state.days[k].busy) delete state.days[k];
+        delete state.days[k].del[id];
       });
       save(); closeSheet(); render(); toast('Deleted'); return;
     }
-    if (act === 'quota-toggle') { state.settings.quotaEnabled = !state.settings.quotaEnabled; save(); render(); return; }
+    if (act === 'quota-toggle') { state.settings.quotaEnabled = !state.settings.quotaEnabled; state.meta.settingsT = stampAfter(state.meta.settingsT); save(); render(); return; }
     if (act === 'export') { exportData(); return; }
     if (act === 'import') { importSheet(); return; }
     if (act === 'import-run') {
@@ -1594,6 +1823,46 @@ function onAction(e) {
       return;
     }
     if (act === 'wipe') { wipeData(); return; }
+
+    if (act.indexOf('sync-') === 0) {
+      var S = window.OrbitSync;
+      if (!S) { toast('Sync is unavailable'); return; }
+      if (act === 'sync-config-save') {
+        var r = S.setConfig($('#cfgUrl').value, $('#cfgKey').value);
+        if (!r.ok) { toast(r.error); return; }
+        syncDraft.url = syncDraft.key = '';
+        render();
+        toast('Project connected — sign in to start syncing');
+        return;
+      }
+      if (act === 'sync-config-clear') {
+        if (!window.confirm('Disconnect this device from the project? Your chart stays on the device.')) return;
+        S.signOut(false); S.setConfig('', ''); render(); toast('Disconnected'); return;
+      }
+      if (act === 'sync-send') { syncDraft.email = $('#syncEmail').value; S.sendCode(syncDraft.email); return; }
+      if (act === 'sync-resend') { S.sendCode(S.snapshot().pending.email); return; }
+      if (act === 'sync-back') { syncDraft.code = ''; S.cancelCode(); return; }
+      if (act === 'sync-verify') {
+        syncDraft.code = $('#syncCode').value;
+        S.verifyCode(syncDraft.code).then(function (okSignIn) {
+          if (!okSignIn) return;
+          syncDraft = { email: '', code: '', url: '', key: '' };
+          render();
+          toast('Signed in — this device and your account are merged');
+        });
+        return;
+      }
+      if (act === 'sync-now') { S.syncNow('manual'); return; }
+      if (act === 'sync-signout') {
+        if (!window.confirm('Sign out? The chart stays on this device.')) return;
+        S.signOut(false); render(); toast('Signed out'); return;
+      }
+      if (act === 'sync-signout-wipe') {
+        if (!window.confirm('Sign out and delete the local copy on this device? Your account keeps its own copy.')) return;
+        S.signOut(true); toast('Signed out, device cleared'); return;
+      }
+      return;
+    }
   }
 
   var planet = e.target.closest('.planet');
@@ -1646,11 +1915,20 @@ function bindLongPress() {
 }
 
 function bindSettingsInputs() {
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (!t || !t.id) return;
+    if (t.id === 'syncEmail') syncDraft.email = t.value;
+    else if (t.id === 'syncCode') syncDraft.code = t.value;
+    else if (t.id === 'cfgUrl') syncDraft.url = t.value;
+    else if (t.id === 'cfgKey') syncDraft.key = t.value;
+  });
   document.addEventListener('change', function (e) {
     var f = e.target.closest('[data-setting]');
     if (!f) return;
     var key = f.getAttribute('data-setting');
     state.settings[key] = clamp(Math.round(+f.value || 0), 0, 7);
+    state.meta.settingsT = stampAfter(state.meta.settingsT);
     save();
     render();
   });
@@ -1713,7 +1991,7 @@ function init() {
   sheetBody = $('#sheetBody'); toastEl = $('#toast'); fxEl = $('#fx');
 
   state = load();
-  var isNew = !Object.keys(state.days).length && state.meta.peakPoints === 0;
+  var isNew = !loggedDays().length && state.meta.peakPoints === 0;
   save();
 
   ui.date = today(); ui.week = weekStart(ui.date); ui.month = monthStart(ui.date);
@@ -1726,6 +2004,23 @@ function init() {
   watchRollover();
   loadFonts();
   registerSW();
+
+  if (window.OrbitSync) {
+    window.OrbitSync.subscribe(function () { refreshSyncUI(); });
+    window.OrbitSync.attach({
+      getDoc: function () { return JSON.parse(JSON.stringify(state)); },
+      mergeDoc: function (doc) { return mergeDoc(doc); },
+      save: save,
+      render: render,
+      wipeLocal: function () {
+        try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+        state = freshState();
+        save();
+        ui.date = today(); ui.week = weekStart(ui.date); ui.month = monthStart(ui.date);
+        render();
+      }
+    });
+  }
 
   window.addEventListener('storage', function (e) {
     if (e.key !== STORAGE_KEY) return;
@@ -1742,7 +2037,8 @@ function init() {
     statusOf: statusOf, isDischarged: isDischarged, dailyObligations: dailyObligations,
     dayCompletion: dayCompletion, habitStreak: habitStreak, overallStreak: overallStreak,
     levelInfo: levelInfo, levelThreshold: levelThreshold, weekTarget: weekTarget, weekPoints: weekPoints,
-    setLog: setLog, setBusy: setBusy, mergeImport: mergeImport, isEditable: isEditable,
+    setLog: setLog, setBusy: setBusy, mergeImport: mergeImport, mergeDoc: mergeDoc, isEditable: isEditable,
+    now: now, loggedDays: loggedDays,
     reset: function (seed) { state = seed ? normalise(seed) : freshState(); save(); render(); },
     ui: ui
   };

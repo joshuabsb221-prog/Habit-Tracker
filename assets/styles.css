@@ -80,6 +80,9 @@ button{background:none;border:0;cursor:pointer;padding:0}
   background:rgba(255,255,255,.28);white-space:nowrap;
 }
 .chip--level{border-color:var(--accent);background:rgba(200,127,94,.16)}
+.chip--sync{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;cursor:pointer}
+.chip--sync[hidden]{display:none}
+.chip--sync.is-error{border-color:var(--terracotta)}
 
 /* ---------- view shell ---------- */
 .view{

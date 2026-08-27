@@ -3,13 +3,15 @@
    Every path below is resolved against that scope, which keeps this correct
    at a domain root and under a GitHub Pages project path alike.
    Bump CACHE when a shell file changes. */
-var CACHE = 'orbit-shell-v1';
+var CACHE = 'orbit-shell-v2';
 var BASE = self.registration ? self.registration.scope : self.location.href;
 var SHELL = [
   '',
   'index.html',
   'sw.js',
   'assets/styles.css',
+  'assets/config.js',
+  'assets/sync.js',
   'assets/app.js',
   'assets/manifest.webmanifest',
   'assets/icons/icon.svg',
